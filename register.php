@@ -1,448 +1,378 @@
-
 <?php
-session_start();
-require_once 'config.php';
+require_once 'includes/config.php';
+require_once 'includes/db.php';
 
+// Fetch categories and fields for interests selection
 try {
-    $interests_sql = "SELECT * FROM research_interests ORDER BY category, name";
-    $interests_stmt = $pdo->query($interests_sql);
-    $interests = $interests_stmt->fetchAll();
-
+    $conn = getDBConnection();
+    $stmt = $conn->query("
+        SELECT mc.category_id, mc.category_name, mc.category_icon,
+               rf.field_id, rf.field_name
+        FROM main_categories mc
+        LEFT JOIN research_fields rf ON mc.category_id = rf.category_id
+        ORDER BY mc.category_name, rf.field_name
+    ") ;
     
-    $grouped_interests = [];
-    foreach ($interests as $interest) {
-        $grouped_interests[$interest['category']][] = $interest;
+    $categories = [];
+    while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+        if (!isset($categories[$row['category_id']])) {
+            $categories[$row['category_id']] = [
+                'name' => $row['category_name'],
+                'icon' => $row['category_icon'],
+                'fields' => []
+            ];
+        }
+        if ($row['field_id']) {
+            $categories[$row['category_id']]['fields'][] = [
+                'id' => $row['field_id'],
+                'name' => $row['field_name']
+            ];
+        }
     }
-} catch (PDOException $e) {
-    $error_message = "Failed to fetch research interests. Please try again later.";
+} catch(PDOException $e) {
+    $error = "System error. Please try again later.";
 }
 
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['register'])) {
-    $username = trim($_POST['username']);
+if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+    $fullname = trim($_POST['fullname']);
     $email = trim($_POST['email']);
+    $phone = trim($_POST['phone']);
     $password = $_POST['password'];
-    $confirm_password = $_POST['confirm_password'];
-    $full_name = trim($_POST['full_name']);
-    $institution = trim($_POST['institution']);
-    $selected_interests = $_POST['interests'] ?? [];
-    
-    $errors = [];
-    
-    // Validate username
-    if (strlen($username) < 3) {
-        $errors[] = "Username must be at least 3 characters long";
-    }
-    if (!preg_match('/^[a-zA-Z0-9_]+$/', $username)) {
-        $errors[] = "Username can only contain letters, numbers, and underscores";
-    }
-    
-    // Check if username exists
-    $stmt = $pdo->prepare("SELECT id FROM users WHERE username = ?");
-    $stmt->execute([$username]);
-    if ($stmt->rowCount() > 0) {
-        $errors[] = "Username already exists";
-    }
-    
-    // Validate email
-    if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-        $errors[] = "Invalid email format";
-    }
-    
-    // Check if email exists
-    $stmt = $pdo->prepare("SELECT id FROM users WHERE email = ?");
-    $stmt->execute([$email]);
-    if ($stmt->rowCount() > 0) {
-        $errors[] = "Email already exists";
-    }
-    
-    // Validate password
-    if (strlen($password) < 8) {
-        $errors[] = "Password must be at least 8 characters long";
-    }
-    if (!preg_match('/[A-Z]/', $password)) {
-        $errors[] = "Password must contain at least one uppercase letter";
-    }
-    if (!preg_match('/[a-z]/', $password)) {
-        $errors[] = "Password must contain at least one lowercase letter";
-    }
-    if (!preg_match('/[0-9]/', $password)) {
-        $errors[] = "Password must contain at least one number";
-    }
-    
-    if ($password !== $confirm_password) {
-        $errors[] = "Passwords do not match";
-    }
-    
-    // Validate interests
-    if (empty($selected_interests)) {
-        $errors[] = "Please select at least one research interest";
-    }
-    
-    
-    if (empty($errors)) {
+    $interests = isset($_POST['interests']) ? $_POST['interests'] : [];
+
+    //  validation
+    if (empty($fullname) || empty($email) || empty($phone) || empty($password)) {
+        $error = "All fields are required.";
+    } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+        $error = "Invalid email format.";
+    } elseif (empty($interests)) {
+        $error = "Please select at least one interest.";
+    } else {
         try {
-            $pdo->beginTransaction();
-            
-            // Insert user
-            $hashed_password = password_hash($password, PASSWORD_DEFAULT);
-            $sql = "INSERT INTO users (username, email, password, full_name, institution) VALUES (?, ?, ?, ?, ?)";
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute([$username, $email, $hashed_password, $full_name, $institution]);
-            
-            $user_id = $pdo->lastInsertId();
-            
-            // Insert user interests
-            $interest_sql = "INSERT INTO user_interests (user_id, interest_id) VALUES (?, ?)";
-            $interest_stmt = $pdo->prepare($interest_sql);
-            foreach ($selected_interests as $interest_id) {
-                $interest_stmt->execute([$user_id, $interest_id]);
+            $conn->beginTransaction();
+
+            // Check if email or phone already exists
+            $stmt = $conn->prepare("SELECT COUNT(*) FROM users WHERE email = ? OR phone_number = ?");
+            $stmt->execute([$email, $phone]);
+            if ($stmt->fetchColumn() > 0) {
+                throw new PDOException("Email or phone number already registered.");
             }
+
+            // Insert user
+            $stmt = $conn->prepare("INSERT INTO users (full_name, email, phone_number, password) VALUES (?, ?, ?, ?)");
+            $password_hash = password_hash($password, PASSWORD_DEFAULT);
+            $stmt->execute([$fullname, $email, $phone, $password_hash]);
             
-            $pdo->commit();
-            $_SESSION['success_message'] = "Registration successful! Please login.";
-            header("Location: Login.php");
+            $user_id = $conn->lastInsertId();
+
+            // Insert interests
+            $stmt = $conn->prepare("INSERT INTO user_interests (user_id, field_id) VALUES (?, ?)");
+            foreach ($interests as $field_id) {
+                $stmt->execute([$user_id, $field_id]);
+            }
+
+            $conn->commit();
+            header('Location: login.php?registered=1');
             exit();
         } catch (PDOException $e) {
-            $pdo->rollBack();
-            $errors[] = "Registration failed. Please try again.";
+            $conn->rollBack();
+            $error = $e->getMessage();
         }
     }
 }
 ?>
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Join ResearchConnect - Next-Gen Research Platform</title>
+    <title>Register - ResearchHub</title>
+    <link href="https://fonts.googleapis.com/icon?family=Material+Icons" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&display=swap" rel="stylesheet">
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.7.2/font/bootstrap-icons.css">
     <style>
-        :root {
-            --primary-color: #2e3192;
-            --secondary-color: #00ff9d;
-            --dark: #0a0a1a;
-            --light: #ffffff;
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Poppins', sans-serif;
         }
 
         body {
-            font-family: 'Poppins', sans-serif;
-            background: var(--dark);
-            color: var(--light);
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
             min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 2rem;
+            color: #e0e0e0;
         }
 
-        .loading-bar {
-            position: fixed;
-            top: 0;
-            left: 0;
-            height: 3px;
-            background: var(--secondary-color);
-            z-index: 9999;
-            transition: width 1s ease;
-        }
-
-        .navbar {
-            background: rgba(10, 10, 26, 0.95);
-            backdrop-filter: blur(10px);
-        }
-
-        .card {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            backdrop-filter: blur(10px);
-            border-radius: 15px;
-        }
-
-        .card-header {
-            background: rgba(255, 255, 255, 0.05);
-            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-            padding: 1.5rem;
-        }
-
-        .form-control, .form-select {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            color: var(--light);
-            border-radius: 10px;
-        }
-
-        .form-control:focus, .form-select:focus {
+        .register-container {
             background: rgba(255, 255, 255, 0.1);
-            border-color: var(--secondary-color);
-            color: var(--light);
-            box-shadow: 0 0 0 0.25rem rgba(0, 255, 157, 0.25);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 20px;
+            box-shadow: 0 8px 32px 0 rgba(31, 38, 135, 0.37);
+            width: 100%;
+            max-width: 600px;
+            padding: 2.5rem;
+            position: relative;
+            animation: float 6s ease-in-out infinite;
         }
 
-        .btn-primary {
-            background: linear-gradient(135deg, var(--primary-color), #4a4eff);
-            border: none;
-            padding: 0.75rem 1.5rem;
+        .header {
+            text-align: center;
+            margin-bottom: 2.5rem;
+        }
+
+        .header h1 {
+            font-size: 2.8rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            background: linear-gradient(45deg, #00f2fe, #4facfe);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .header p {
+            color: #b0b0b0;
+            font-size: 1.1rem;
+        }
+
+        .form-group {
+            margin-bottom: 1.8rem;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 0.7rem;
+            color: #fff;
             font-weight: 500;
+            font-size: 0.95rem;
+            letter-spacing: 0.5px;
         }
 
-        .btn-primary:hover {
-            background: linear-gradient(135deg, #4a4eff, var(--primary-color));
-            transform: translateY(-2px);
-        }
-
-        .interest-checkbox {
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            padding: 1rem;
-            margin-bottom: 1rem;
-            cursor: pointer;
+        .form-group input {
+            width: 100%;
+            padding: 1rem 1.2rem;
+            background: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 12px;
+            color: #fff;
+            font-size: 1rem;
             transition: all 0.3s ease;
         }
 
-        .interest-checkbox:hover {
+        .form-group input:focus {
+            outline: none;
+            border-color: #4facfe;
+            box-shadow: 0 0 15px rgba(79, 172, 254, 0.3);
+            background: rgba(255, 255, 255, 0.15);
+        }
+
+        .interests-section {
+            margin-top: 2.5rem;
+        }
+
+        .interests-section h3 {
+            color: #fff;
+            margin-bottom: 1.5rem;
+            font-weight: 600;
+            font-size: 1.2rem;
+        }
+
+        .category {
+            margin-bottom: 1.8rem;
             background: rgba(255, 255, 255, 0.1);
+            padding: 1.2rem;
+            border-radius: 15px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            transition: all 0.3s ease;
+        }
+
+        .category:hover {
+            background: rgba(255, 255, 255, 0.15);
             transform: translateY(-2px);
+            box-shadow: 0 5px 15px rgba(0,0,0,0.2);
         }
 
-        .tech-circles {
-            position: fixed;
+        .category-header {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+            margin-bottom: 1.2rem;
+            color: #4facfe;
+        }
+
+        .fields-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+            gap: 1rem;
+        }
+
+        .field-item {
+            display: flex;
+            align-items: center;
+            gap: 0.8rem;
+        }
+
+        .field-item input[type="checkbox"] {
+            width: 20px;
+            height: 20px;
+            accent-color: #4facfe;
+            cursor: pointer;
+        }
+
+        .field-item label {
+            color: #fff;
+            font-size: 0.95rem;
+            cursor: pointer;
+        }
+
+        .submit-btn {
             width: 100%;
-            height: 100%;
-            top: 0;
-            left: 0;
-            z-index: -1;
-            overflow: hidden;
+            padding: 1rem;
+            background: linear-gradient(45deg, #00f2fe, #4facfe);
+            color: white;
+            border: none;
+            border-radius: 12px;
+            font-size: 1.1rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-transform: uppercase;
+            letter-spacing: 1px;
         }
 
-        .tech-circle {
-            position: absolute;
-            border-radius: 50%;
-            background: linear-gradient(135deg, var(--primary-color), #4a4eff);
-            filter: blur(60px);
-            opacity: 0.15;
+        .submit-btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(79, 172, 254, 0.4);
         }
 
-        .tech-circle:nth-child(1) {
-            width: 600px;
-            height: 600px;
-            top: -200px;
-            right: -200px;
+        .error {
+            background: rgba(255, 87, 87, 0.1);
+            border: 1px solid rgba(255, 87, 87, 0.3);
+            color: #ff5757;
+            padding: 1rem;
+            border-radius: 12px;
+            margin-bottom: 1.5rem;
+            backdrop-filter: blur(5px);
         }
 
-        .tech-circle:nth-child(2) {
-            width: 500px;
-            height: 500px;
-            bottom: -150px;
-            left: -150px;
+        .login-link {
+            text-align: center;
+            margin-top: 1.8rem;
+            color: #fff;
+        }
+
+        .login-link a {
+            color: #4facfe;
+            text-decoration: none;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .login-link a:hover {
+            color: #00f2fe;
+            text-shadow: 0 0 10px rgba(79, 172, 254, 0.4);
+        }
+
+        @media (max-width: 640px) {
+            body {
+                padding: 1rem;
+            }
+
+            .register-container {
+                padding: 1.5rem;
+            }
+
+            .header h1 {
+                font-size: 2.2rem;
+            }
+
+            .fields-grid {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @keyframes float {
+            0% {
+                transform: translateY(0px);
+            }
+            50% {
+                transform: translateY(-10px);
+            }
+            100% {
+                transform: translateY(0px);
+            }
         }
     </style>
 </head>
 <body>
-    <div class="loading-bar"></div>
-    
-    <div class="tech-circles">
-        <div class="tech-circle"></div>
-        <div class="tech-circle"></div>
-    </div>
-
-    <nav class="navbar navbar-expand-lg navbar-dark">
-        <div class="container">
-            <a class="navbar-brand" href="index.php">
-                <i class="bi bi-braces"></i> ResearchConnect
-            </a>
-            <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#navbarNav">
-                <span class="navbar-toggler-icon"></span>
-            </button>
-            <div class="collapse navbar-collapse" id="navbarNav">
-                <ul class="navbar-nav ms-auto">
-                    <li class="nav-item">
-                        <a class="nav-link" href="Login.php">Login</a>
-                    </li>
-                    <li class="nav-item">
-                        <a class="nav-link active" href="register.php">Register</a>
-                    </li>
-                </ul>
-            </div>
+    <div class="register-container">
+        <div class="header">
+            <h1>ResearchHub</h1>
+            <p>Join our research community</p>
         </div>
-    </nav>
 
-    <div class="container mt-5">
-        <div class="row justify-content-center">
-            <div class="col-md-8">
-                <div class="card">
-                    <div class="card-header">
-                        <h3 class="text-center mb-0">
-                            <i class="bi bi-person-plus me-2"></i>
-                            Join ResearchConnect
-                        </h3>
-                    </div>
-                    <div class="card-body p-4">
-                        <?php if (!empty($errors)): ?>
-                            <div class="alert alert-danger">
-                                <ul class="mb-0">
-                                    <?php foreach ($errors as $error): ?>
-                                        <li><?php echo htmlspecialchars($error); ?></li>
-                                    <?php endforeach; ?>
-                                </ul>
-                            </div>
-                        <?php endif; ?>
+        <?php if (isset($error)): ?>
+            <div class="error"><?php echo htmlspecialchars($error); ?></div>
+        <?php endif; ?>
 
-                        <form method="POST" action="" id="registerForm">
-                            <div class="row g-4">
-                                <div class="col-md-6">
-                                    <div class="form-floating">
-                                        <input type="text" class="form-control" id="username" name="username" 
-                                               placeholder="Username" required
-                                               value="<?php echo isset($_POST['username']) ? htmlspecialchars($_POST['username']) : ''; ?>">
-                                        <label for="username">Username</label>
-                                    </div>
+        <form method="POST" action="">
+            <div class="form-group">
+                <label for="fullname">Full Name</label>
+                <input type="text" id="fullname" name="fullname" value="<?php echo isset($_POST['fullname']) ? htmlspecialchars($_POST['fullname']) : ''; ?>" required>
+            </div>
+
+            <div class="form-group">
+                <label for="email">Email</label>
+                <input type="email" id="email" name="email" value="<?php echo isset($_POST['email']) ? htmlspecialchars($_POST['email']) : ''; ?>" required>
+            </div>
+
+            <div class="form-group">
+                <label for="phone">Phone Number</label>
+                <input type="tel" id="phone" name="phone" value="<?php echo isset($_POST['phone']) ? htmlspecialchars($_POST['phone']) : ''; ?>" required>
+            </div>
+
+            <div class="form-group">
+                <label for="password">Password</label>
+                <input type="password" id="password" name="password" required>
+            </div>
+
+            <div class="interests-section">
+                <h3>Select Your Interests</h3>
+                <?php foreach ($categories as $category): ?>
+                    <div class="category">
+                        <div class="category-header">
+                            <span class="material-icons"><?php echo htmlspecialchars($category['icon']); ?></span>
+                            <h4><?php echo htmlspecialchars($category['name']); ?></h4>
+                        </div>
+                        <div class="fields-grid">
+                            <?php foreach ($category['fields'] as $field): ?>
+                                <div class="field-item">
+                                    <input type="checkbox" 
+                                           id="field_<?php echo $field['id']; ?>" 
+                                           name="interests[]" 
+                                           value="<?php echo $field['id']; ?>"
+                                           <?php echo (isset($_POST['interests']) && in_array($field['id'], $_POST['interests'])) ? 'checked' : ''; ?>>
+                                    <label for="field_<?php echo $field['id']; ?>">
+                                        <?php echo htmlspecialchars($field['name']); ?>
+                                    </label>
                                 </div>
-                                
-                                <div class="col-md-6">
-                                    <div class="form-floating">
-                                        <input type="email" class="form-control" id="email" name="email" 
-                                               placeholder="Email" required
-                                               value="<?php echo isset($_POST['email']) ? htmlspecialchars($_POST['email']) : ''; ?>">
-                                        <label for="email">Email</label>
-                                    </div>
-                                </div>
-
-                                <div class="col-md-6">
-                                    <div class="form-floating">
-                                        <input type="password" class="form-control" id="password" name="password" 
-                                               placeholder="Password" required>
-                                        <label for="password">Password</label>
-                                    </div>
-                                    <div id="passwordStrength" class="progress mt-2" style="height: 5px;">
-                                        <div class="progress-bar" role="progressbar"></div>
-                                    </div>
-                                </div>
-
-                                <div class="col-md-6">
-                                    <div class="form-floating">
-                                        <input type="password" class="form-control" id="confirm_password" 
-                                               name="confirm_password" placeholder="Confirm Password" required>
-                                        <label for="confirm_password">Confirm Password</label>
-                                    </div>
-                                </div>
-
-                                <div class="col-md-6">
-                                    <div class="form-floating">
-                                        <input type="text" class="form-control" id="full_name" name="full_name" 
-                                               placeholder="Full Name" required
-                                               value="<?php echo isset($_POST['full_name']) ? htmlspecialchars($_POST['full_name']) : ''; ?>">
-                                        <label for="full_name">Full Name</label>
-                                    </div>
-                                </div>
-
-                                <div class="col-md-6">
-                                    <div class="form-floating">
-                                        <input type="text" class="form-control" id="institution" name="institution" 
-                                               placeholder="Institution" required
-                                               value="<?php echo isset($_POST['institution']) ? htmlspecialchars($_POST['institution']) : ''; ?>">
-                                        <label for="institution">Institution</label>
-                                    </div>
-                                </div>
-
-                                <div class="col-12">
-                                    <h5 class="mb-3">
-                                        <i class="bi bi-diagram-3 me-2"></i>
-                                        Research Interests
-                                    </h5>
-                                    <?php foreach ($grouped_interests as $category => $interests): ?>
-                                        <div class="mb-4">
-                                            <h6 class="mb-3"><?php echo htmlspecialchars($category); ?></h6>
-                                            <div class="row g-3">
-                                                <?php foreach ($interests as $interest): ?>
-                                                    <div class="col-md-6">
-                                                        <div class="interest-checkbox">
-                                                            <div class="form-check">
-                                                                <input class="form-check-input" type="checkbox" 
-                                                                       name="interests[]" 
-                                                                       value="<?php echo $interest['id']; ?>" 
-                                                                       id="interest_<?php echo $interest['id']; ?>"
-                                                                       <?php echo (isset($_POST['interests']) && in_array($interest['id'], $_POST['interests'])) ? 'checked' : ''; ?>>
-                                                                <label class="form-check-label" for="interest_<?php echo $interest['id']; ?>">
-                                                                    <?php echo htmlspecialchars($interest['name']); ?>
-                                                                </label>
-                                                            </div>
-                                                        </div>
-                                                    </div>
-                                                <?php endforeach; ?>
-                                            </div>
-                                        </div>
-                                    <?php endforeach; ?>
-                                </div>
-
-                                <div class="col-12">
-                                    <button type="submit" name="register" class="btn btn-primary w-100">
-                                        <i class="bi bi-person-plus me-2"></i>
-                                        Create Account
-                                    </button>
-                                </div>
-                            </div>
-                        </form>
-
-                        <div class="text-center mt-4">
-                            Already have an account? <a href="Login.php" class="text-decoration-none">Login here</a>
+                            <?php endforeach; ?>
                         </div>
                     </div>
-                </div>
+                <?php endforeach; ?>
             </div>
+
+            <button type="submit" class="submit-btn">Create Account</button>
+        </form>
+
+        <div class="login-link">
+            Already have an account? <a href="login.php">Login here</a>
         </div>
     </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
-    <script>
-        // Loading bar animation
-        document.addEventListener('DOMContentLoaded', function() {
-            const loadingBar = document.querySelector('.loading-bar');
-            loadingBar.style.width = '100%';
-            setTimeout(() => {
-                loadingBar.style.opacity = '0';
-            }, 1000);
-        });
-
-        
-        document.getElementById('password').addEventListener('input', function() {
-            const password = this.value;
-            const progressBar = document.querySelector('#passwordStrength .progress-bar');
-            let strength = 0;
-
-            if (password.length >= 8) strength += 25;
-            if (password.match(/[A-Z]/)) strength += 25;
-            if (password.match(/[a-z]/)) strength += 25;
-            if (password.match(/[0-9]/)) strength += 25;
-
-            progressBar.style.width = strength + '%';
-            
-            if (strength <= 25) {
-                progressBar.className = 'progress-bar bg-danger';
-            } else if (strength <= 50) {
-                progressBar.className = 'progress-bar bg-warning';
-            } else if (strength <= 75) {
-                progressBar.className = 'progress-bar bg-info';
-            } else {
-                progressBar.className = 'progress-bar bg-success';
-            }
-        });
-        document.getElementById('registerForm').addEventListener('submit', function(e) {
-            const password = document.getElementById('password').value;
-            const confirmPassword = document.getElementById('confirm_password').value;
-            const interests = document.querySelectorAll('input[name="interests[]"]:checked');
-
-            if (password !== confirmPassword) {
-                e.preventDefault();
-                alert('Passwords do not match!');
-                return;
-            }
-
-            if (interests.length === 0) {
-                e.preventDefault();
-                alert('Please select at least one research interest!');
-                return;
-            }
-        });
-    </script>
 </body>
 </html>
